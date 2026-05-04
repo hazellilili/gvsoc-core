@@ -226,7 +226,15 @@ static inline iss_reg_t breakpoint_check_exec(Iss *iss, iss_insn_t *insn, iss_re
     {
         iss->exec.retain_inc();
         iss->exec.halted.set(true);
-        iss->gdbserver.gdbserver->signal(&iss->gdbserver, vp::Gdbserver_engine::SIGNAL_TRAP, "hwbreak");
+        if (iss->gdbserver.is_enabled())
+        {
+            iss->gdbserver.gdbserver->signal(&iss->gdbserver, vp::Gdbserver_engine::SIGNAL_TRAP, "hwbreak");
+        }
+        else
+        {
+            iss->gdbserver.breakpoint_hit = true;
+            iss->gdbserver.breakpoint_hit_addr = pc;
+        }
         return pc;
     }
     else
@@ -362,8 +370,17 @@ bool Gdbserver::watchpoint_check(bool is_write, iss_addr_t addr, int size)
             this->iss.exec.retain_inc();
             this->iss.exec.halted.set(true);
             iss_reg_t hit_addr = std::max(wp->addr, addr);
-            this->iss.gdbserver.gdbserver->signal(&this->iss.gdbserver,
-                vp::Gdbserver_engine::SIGNAL_TRAP, is_write ? "watch" : "rwatch", hit_addr);
+            if (this->is_enabled())
+            {
+                this->iss.gdbserver.gdbserver->signal(&this->iss.gdbserver,
+                    vp::Gdbserver_engine::SIGNAL_TRAP, is_write ? "watch" : "rwatch", hit_addr);
+            }
+            else
+            {
+                this->watchpoint_hit = true;
+                this->watchpoint_hit_addr = hit_addr;
+                this->watchpoint_hit_is_write = is_write;
+            }
             return true;
         }
     }

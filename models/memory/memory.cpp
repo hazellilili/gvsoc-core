@@ -23,6 +23,7 @@
 #include <string.h>
 #include <vp/vp.hpp>
 #include <vp/signal.hpp>
+#include <vp/stats/stats.hpp>
 #include <vp/memcheck.hpp>
 #include <vp/itf/io.hpp>
 #include <vp/itf/wire.hpp>
@@ -69,6 +70,10 @@ private:
     bool check = false;
     int width_bits = -1;
 
+    // Mask applied to incoming request addresses. -1 (all bits set) means no
+    // truncation. Otherwise it's (truncate_size - 1), where truncate_size is the
+    // user-provided window size to wrap addresses into.
+    uint64_t truncate_mask = (uint64_t)-1;
 
     uint8_t *mem_data;
     uint8_t *memcheck_data = NULL;
@@ -111,6 +116,14 @@ private:
     // Number of requests logged in the same cycle. Used to delay a bit in the trace the requests
     // which arrives in the same cycle
     int nb_logged_access_in_same_cycle = 0;
+
+    // Statistics
+    vp::StatScalar stat_reads;
+    vp::StatScalar stat_writes;
+    vp::StatScalar stat_bytes_read;
+    vp::StatScalar stat_bytes_written;
+    vp::StatBw stat_read_bw;
+    vp::StatBw stat_write_bw;
 };
 
 
@@ -133,6 +146,16 @@ log_is_write(*this, "req_is_write", 1, vp::SignalCommon::ResetKind::HighZ)
     traces.new_trace("trace", &trace, vp::DEBUG);
     in.set_req_meth(&Memory::req);
     new_slave_port("input", &in);
+
+    // Register statistics
+    this->stats.register_stat(&this->stat_reads, "reads", "Number of read accesses");
+    this->stats.register_stat(&this->stat_writes, "writes", "Number of write accesses");
+    this->stats.register_stat(&this->stat_bytes_read, "bytes_read", "Total bytes read");
+    this->stats.register_stat(&this->stat_bytes_written, "bytes_written", "Total bytes written");
+    this->stats.register_stat(&this->stat_read_bw, "read_bandwidth", "Average read bandwidth");
+    this->stat_read_bw.set_source(&this->stat_bytes_read);
+    this->stats.register_stat(&this->stat_write_bw, "write_bandwidth", "Average write bandwidth");
+    this->stat_write_bw.set_source(&this->stat_bytes_written);
 
     this->power_ctrl_itf.set_sync_meth(&Memory::power_ctrl_sync);
     new_slave_port("power_ctrl", &this->power_ctrl_itf);
@@ -159,6 +182,15 @@ log_is_write(*this, "req_is_write", 1, vp::SignalCommon::ResetKind::HighZ)
     this->check = get_js_config()->get_child_bool("check");
     this->width_bits = get_js_config()->get_child_int("width_bits");
     int align = get_js_config()->get_child_int("align");
+
+    // Optional address truncation. 0 means inactive; any non-zero value (which
+    // should be a power of 2) is taken as the truncation window — incoming addresses
+    // are AND-masked with (truncate_size - 1) before being used as offsets.
+    int64_t truncate_size = get_js_config()->get_int("truncate_size");
+    if (truncate_size > 0)
+    {
+        this->truncate_mask = (uint64_t)truncate_size - 1;
+    }
 
     trace.msg("Building Memory (size: 0x%x, check: %d)\n", this->cfg.size, check);
 
@@ -267,11 +299,23 @@ vp::IoReqStatus Memory::req(vp::Block *__this, vp::IoReq *req)
 {
     Memory *_this = (Memory *)__this;
 
-    uint64_t offset = req->get_addr();
+    uint64_t offset = req->get_addr() & _this->truncate_mask;
     uint8_t *data = req->get_data();
     uint64_t size = req->get_size();
 
     _this->trace.msg("Memory access (offset: 0x%x, size: 0x%x, is_write: %d, op: %d)\n", offset, size, req->get_is_write(), req->get_opcode());
+
+    // Count stats
+    if (req->get_is_write())
+    {
+        _this->stat_writes++;
+        _this->stat_bytes_written += size;
+    }
+    else
+    {
+        _this->stat_reads++;
+        _this->stat_bytes_read += size;
+    }
 
     _this->log_access(offset, size, req->get_is_write());
 
@@ -283,7 +327,7 @@ vp::IoReqStatus Memory::req(vp::Block *__this, vp::IoReq *req)
         if (_this->width_bits != -1)
         {
     #define MAX(a, b) (((a) > (b)) ? (a) : (b))
-            int duration = MAX(size >> _this->width_bits, 1);
+            int duration = ((size - 1) >> _this->width_bits) + 1;
             req->set_duration(duration);
             int64_t cycles = _this->clock.get_cycles();
             int64_t diff = _this->next_packet_start - cycles;
