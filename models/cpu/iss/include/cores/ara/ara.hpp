@@ -124,6 +124,12 @@ private:
 
     void handle_access(iss_insn_t *insn, bool is_write, int reg, bool do_stride=false, iss_reg_t stride=0, int reg_indexed=-1);
 
+    // Handler for asynchronous burst grants
+    static void data_grant(vp::Block *__this, vp::IoReq *req);
+    // Handler for asynchronous burst responses
+    static void data_response(vp::Block *__this, vp::IoReq *req);
+
+
     // Number of instruction that can be enqueued at the same time
     static constexpr int queue_size = 4;
 
@@ -184,6 +190,60 @@ private:
     int pending_elem;
     int inst_elem_size;
     int width;
+
+    // True if one burst was not granted. Once it is true, the block can not send any burst
+    // anymore until the last one is granted
+    bool stalled;
+
+    // Bursts which have been handled synchronously with a delay. There are hold here until their
+    // delay has elapsed
+    struct DelayedBurst
+    {
+        vp::IoReq *req;
+        int64_t timestamp;
+    };
+
+    struct DelayedBurstCompare
+    {
+        bool operator()(const DelayedBurst &a, const DelayedBurst &b) const
+        {
+            return a.timestamp > b.timestamp;
+        }
+    };
+
+    std::priority_queue<DelayedBurst, std::vector<DelayedBurst>, DelayedBurstCompare> delayed_bursts;
+
+    // For mempool configuration
+    struct VlsuRobEntry
+    {
+        // Port and id
+        int port = 0;
+        int rob_id = 0;
+
+        // If the entry is allocated to a request
+        bool allocated = false;
+
+        // If the response is valid
+        bool valid = false;
+
+        // Request itself
+        vp::IoReq *req = nullptr;
+
+        // Instruction slot issued the request
+        AraVlsuPendingInsn *slot = nullptr;
+
+        // Vector register
+        int vreg = 0;
+    };
+
+    // Reorder buffer
+    std::vector<std::vector<VlsuRobEntry>> rob; 
+    // Next available entry in the ROB for each port
+    std::vector<int> rob_next;
+    // The first entry in the ROB which is waiting for response for each port
+    std::vector<int> rob_first;
+    // Number of allocated entries in the ROB for each port
+    std::vector<int> rob_count;
 };
 
 #else
